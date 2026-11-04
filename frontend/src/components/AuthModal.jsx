@@ -135,59 +135,71 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
     if (!file) return;
 
     const sizeInKB = Math.round(file.size / 1024);
+    const fileName = file.name || '';
+    const fileExt = fileName.slice((fileName.lastIndexOf('.') - 1 >>> 0) + 2).toLowerCase();
+    const allowedExtensions = ['pdf', 'jpg', 'jpeg', 'png', 'webp'];
 
-    // Enforce specific 500 KB limit
+    // 1. Validate file extension / MIME type
+    if (!allowedExtensions.includes(fileExt) && !file.type.match(/^(image\/(jpeg|png|webp)|application\/pdf)$/)) {
+      setError(`File "${fileName}" is not supported. Only PDF, JPG, JPEG, PNG, and WEBP documents are allowed.`);
+      e.target.value = '';
+      return;
+    }
+
+    // 2. Enforce strict 500 KB limit
     if (file.size > MAX_DOC_SIZE_KB * 1024) {
-      setError(`File "${file.name}" is ${sizeInKB} KB, which exceeds the required ${MAX_DOC_SIZE_KB} KB limit. Please compress it using the free image compressor link at the bottom.`);
+      setError(`File "${fileName}" is ${sizeInKB} KB. Maximum allowed size is ${MAX_DOC_SIZE_KB} KB. Please compress it using the free compressor link at the bottom.`);
       e.target.value = '';
       return;
     }
 
     setError('');
 
-    // Local instant preview & fallback Data URL
+    // Instant local Base64 preview & Cloud persistence Data URL
     const reader = new FileReader();
-    reader.onload = (loadEvt) => {
+    reader.onload = async (loadEvt) => {
       const dataUrl = loadEvt.target.result;
       setDocFiles(prev => ({
         ...prev,
         [field]: { name: file.name, sizeKB: sizeInKB, url: dataUrl, uploading: true }
       }));
+      // Default to Data URL so it is stored directly in MongoDB Atlas Cloud
       setFormData(prev => ({ ...prev, [`${field}Doc`]: dataUrl }));
-    };
-    reader.readAsDataURL(file);
 
-    // Try server upload endpoint
-    try {
-      const uploadData = new FormData();
-      uploadData.append('file', file);
-      const res = await fetch('/api/users/upload-doc', {
-        method: 'POST',
-        body: uploadData,
-      });
-      const result = await res.json();
-      if (res.ok && result.url) {
-        setDocFiles(prev => ({
-          ...prev,
-          [field]: { name: file.name, sizeKB: result.sizeKB || sizeInKB, url: result.url, uploading: false }
-        }));
-        setFormData(prev => ({ ...prev, [`${field}Doc`]: result.url }));
-      } else {
-        if (result.message) {
-          setError(result.message);
+      // Also upload to server to get server URL/validation
+      try {
+        const uploadData = new FormData();
+        uploadData.append('file', file);
+        const res = await fetch('/api/users/upload-doc', {
+          method: 'POST',
+          body: uploadData,
+        });
+        const result = await res.json();
+        if (res.ok) {
+          const finalUrl = result.dataUrl || dataUrl || result.url;
+          setDocFiles(prev => ({
+            ...prev,
+            [field]: { name: file.name, sizeKB: result.sizeKB || sizeInKB, url: finalUrl, uploading: false }
+          }));
+          setFormData(prev => ({ ...prev, [`${field}Doc`]: finalUrl }));
+        } else {
+          if (result.message) {
+            setError(result.message);
+          }
+          setDocFiles(prev => ({
+            ...prev,
+            [field]: { ...(prev[field] || {}), uploading: false }
+          }));
         }
+      } catch (err) {
+        // Offline / serverless fallback: retain persistent base64 dataUrl
         setDocFiles(prev => ({
           ...prev,
-          [field]: { ...prev[field], uploading: false }
+          [field]: { ...(prev[field] || {}), uploading: false }
         }));
       }
-    } catch (err) {
-      // Offline fallback: retained base64 dataUrl
-      setDocFiles(prev => ({
-        ...prev,
-        [field]: { ...prev[field], uploading: false }
-      }));
-    }
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleRemoveFile = (field) => {
@@ -241,55 +253,47 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
         setLoading(false);
         return;
       }
-      const cleanGstin = (formData.gstin || '').trim();
+      const cleanGstin = (formData.gstin || '').trim().toUpperCase();
+      let cleanPan = (formData.pan || '').trim().toUpperCase();
+
+      // GSTIN is OPTIONAL. If no GSTIN, PAN Number & PAN document are mandatory.
       if (!cleanGstin) {
-        setError('GSTIN Number is required.');
-        setLoading(false);
-        return;
+        if (!cleanPan) {
+          setError('PAN Number is required when GSTIN is not provided.');
+          setLoading(false);
+          return;
+        }
+        if (cleanPan.length !== 10) {
+          setError('PAN Number must contain exactly 10 alphanumeric characters (e.g. ABCDE1234F).');
+          setLoading(false);
+          return;
+        }
+        if (!formData.panDoc) {
+          setError('Please upload your PAN Card document (PDF/JPG/PNG, Max 500 KB).');
+          setLoading(false);
+          return;
+        }
+      } else {
+        // If GSTIN is entered, auto-derive PAN if PAN field was left empty
+        if (!cleanPan && cleanGstin.length >= 12) {
+          cleanPan = cleanGstin.substring(2, 12);
+        }
       }
-      if (!formData.gstinDoc) {
-        setError('Please upload your GSTIN Certificate document (JPG/PNG, Max 500 KB).');
-        setLoading(false);
-        return;
-      }
-      const cleanPan = (formData.pan || '').trim();
-      if (!cleanPan) {
-        setError('PAN Number is required.');
-        setLoading(false);
-        return;
-      }
-      if (cleanPan.length !== 10) {
-        setError('PAN Number must contain exactly 10 alphanumeric characters (e.g. ABCDE1234F).');
-        setLoading(false);
-        return;
-      }
-      if (!formData.panDoc) {
-        setError('Please upload your PAN Card document (JPG/PNG, Max 500 KB).');
-        setLoading(false);
-        return;
-      }
+
+      // Drug License 1 (Form 20) is required
       const dl1 = (formData.drugLicense1 || formData.drugLicense || '').trim();
       if (!dl1) {
-        setError('Drug License No 1 is required.');
+        setError('Drug License No 1 (Form 20) is required.');
         setLoading(false);
         return;
       }
       if (!formData.drugLicense1Doc) {
-        setError('Please upload your Drug License No 1 document (JPG/PNG, Max 500 KB).');
+        setError('Please upload your Drug License No 1 document (PDF/JPG/PNG, Max 500 KB).');
         setLoading(false);
         return;
       }
-      const dl2 = (formData.drugLicense2 || '').trim();
-      if (!dl2) {
-        setError('Drug License No 2 is required.');
-        setLoading(false);
-        return;
-      }
-      if (!formData.drugLicense2Doc) {
-        setError('Please upload your Drug License No 2 document (JPG/PNG, Max 500 KB).');
-        setLoading(false);
-        return;
-      }
+
+      // Drug License 2 (Form 21) is OPTIONAL - no mandatory check
     }
 
     const url = isLogin ? '/api/users/login' : '/api/users/register';
@@ -690,7 +694,7 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                   </div>
                 </div>
 
-                {/* Tax Credentials Section: GSTIN & PAN (Both Required with Upload ≤ 500 KB) */}
+                {/* Tax Credentials Section: GSTIN (Optional) & PAN (Required if no GST) */}
                 <div style={{ 
                   backgroundColor: 'var(--bg-main, #f8fafc)', 
                   padding: '14px', 
@@ -702,20 +706,26 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
                     <span style={{ fontSize: '0.84rem', fontWeight: '800', color: 'var(--primary-blue, #2563eb)' }}>
-                      Tax Credentials (GSTIN & PAN) <span style={{ color: '#ef4444' }}>*</span>
+                      Tax Credentials (GSTIN / PAN)
                     </span>
-                    <span style={{ fontSize: '0.74rem', color: '#0369a1', backgroundColor: '#e0f2fe', padding: '2px 8px', borderRadius: '12px', fontWeight: '700' }}>
-                      Required • Max 500 KB per document
+                    <span style={{ fontSize: '0.74rem', color: '#0369a1', backgroundColor: '#e0f2fe', padding: '3px 9px', borderRadius: '12px', fontWeight: '700' }}>
+                      GSTIN is Optional • Max 500 KB per document
                     </span>
+                  </div>
+
+                  {/* Informational banner about document formats and size */}
+                  <div style={{ fontSize: '0.76rem', color: '#0f766e', backgroundColor: '#ccfbf1', padding: '6px 10px', borderRadius: '6px', border: '1px solid #99f6e4', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span>📄</span>
+                    <span><strong>માન્ય ડોક્યુમેન્ટ:</strong> PDF, JPG, PNG (Max 500 KB). GST નંબર ન હોય તો ખાલી છોડો અને ફક્ત PAN નંબર દાખલ કરો.</span>
                   </div>
 
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px' }}>
                     
-                    {/* GSTIN Field with Upload Button */}
+                    {/* GSTIN Field (OPTIONAL) with Upload Button */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
                         <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-dark)', whiteSpace: 'nowrap' }}>
-                          GSTIN Number <span style={{ color: '#ef4444' }}>*</span>
+                          GSTIN Number <span style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: '600' }}>(વૈકલ્પિક / Optional)</span>
                         </label>
                         <label style={{
                           display: 'inline-flex', alignItems: 'center', gap: '5px',
@@ -728,7 +738,7 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                           <span>{docFiles.gstin ? 'Change File' : 'Upload (≤500 KB)'}</span>
                           <input 
                             type="file" 
-                            accept="image/png, image/jpeg, image/jpg, .pdf" 
+                            accept=".pdf, .jpg, .jpeg, .png, .webp, application/pdf, image/jpeg, image/png, image/webp" 
                             style={{ display: 'none' }} 
                             onChange={(e) => handleFileUpload(e, 'gstin')} 
                           />
@@ -739,11 +749,10 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                         <input 
                           type="text" 
                           name="gstin" 
-                          required
                           maxLength={15}
                           value={formData.gstin} 
                           onChange={handleChange}
-                          placeholder="24AAAAA0000A1Z"
+                          placeholder="e.g. 24AAAAA0000A1Z (Leave blank if no GST)"
                           style={{ width: '100%', padding: '9px 10px 9px 36px', borderRadius: '6px', border: '1px solid var(--border-light)', fontSize: '0.84rem' }}
                         />
                       </div>
@@ -757,11 +766,11 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                       )}
                     </div>
 
-                    {/* PAN Card Field with Upload Button */}
+                    {/* PAN Card Field with Upload Button (Required if no GSTIN) */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
                         <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-dark)', whiteSpace: 'nowrap' }}>
-                          PAN Number <span style={{ color: '#ef4444' }}>*</span>
+                          PAN Number {!formData.gstin ? <span style={{ color: '#ef4444' }}>* (Required without GST)</span> : <span style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: '600' }}>(Auto-filled / Optional)</span>}
                         </label>
                         <label style={{
                           display: 'inline-flex', alignItems: 'center', gap: '5px',
@@ -774,7 +783,7 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                           <span>{docFiles.pan ? 'Change File' : 'Upload (≤500 KB)'}</span>
                           <input 
                             type="file" 
-                            accept="image/png, image/jpeg, image/jpg, .pdf" 
+                            accept=".pdf, .jpg, .jpeg, .png, .webp, application/pdf, image/jpeg, image/png, image/webp" 
                             style={{ display: 'none' }} 
                             onChange={(e) => handleFileUpload(e, 'pan')} 
                           />
@@ -785,7 +794,7 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                         <input 
                           type="text" 
                           name="pan" 
-                          required
+                          required={!formData.gstin}
                           maxLength={10}
                           value={formData.pan} 
                           onChange={handleChange}
@@ -806,7 +815,7 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                   </div>
                 </div>
 
-                {/* Drug Licenses Section: Drug License 1 & Drug License 2 (Both Required with Upload ≤ 500 KB) */}
+                {/* Drug Licenses Section: Form 20 (Required) & Form 21 (Optional) */}
                 <div style={{ 
                   backgroundColor: 'var(--bg-main, #f8fafc)', 
                   padding: '14px', 
@@ -818,20 +827,26 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
                     <span style={{ fontSize: '0.84rem', fontWeight: '800', color: 'var(--primary-blue, #2563eb)' }}>
-                      Drug Licenses (Form 20 & 21) <span style={{ color: '#ef4444' }}>*</span>
+                      Drug Licenses (Form 20 & 21)
                     </span>
-                    <span style={{ fontSize: '0.74rem', color: '#0369a1', backgroundColor: '#e0f2fe', padding: '2px 8px', borderRadius: '12px', fontWeight: '700' }}>
-                      Required • Max 500 KB per document
+                    <span style={{ fontSize: '0.74rem', color: '#0369a1', backgroundColor: '#e0f2fe', padding: '3px 9px', borderRadius: '12px', fontWeight: '700' }}>
+                      Form 20 Required • Form 21 Optional • Max 500 KB
                     </span>
+                  </div>
+
+                  {/* Informational banner about document formats and size */}
+                  <div style={{ fontSize: '0.76rem', color: '#0f766e', backgroundColor: '#ccfbf1', padding: '6px 10px', borderRadius: '6px', border: '1px solid #99f6e4', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span>📄</span>
+                    <span><strong>માન્ય ડોક્યુમેન્ટ:</strong> PDF, JPG, PNG (Max 500 KB). Form 20 લાયસન્સ ફરજિયાત છે, Form 21 વૈકલ્પિક છે.</span>
                   </div>
 
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px' }}>
                     
-                    {/* Drug License No 1 Field with Upload Button */}
+                    {/* Drug License No 1 Field (REQUIRED) with Upload Button */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
                         <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-dark)', whiteSpace: 'nowrap' }}>
-                          Drug License No 1 <span style={{ color: '#ef4444' }}>*</span>
+                          Drug License No 1 (Form 20) <span style={{ color: '#ef4444' }}>*</span>
                         </label>
                         <label style={{
                           display: 'inline-flex', alignItems: 'center', gap: '5px',
@@ -844,7 +859,7 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                           <span>{docFiles.drugLicense1 ? 'Change File' : 'Upload (≤500 KB)'}</span>
                           <input 
                             type="file" 
-                            accept="image/png, image/jpeg, image/jpg, .pdf" 
+                            accept=".pdf, .jpg, .jpeg, .png, .webp, application/pdf, image/jpeg, image/png, image/webp" 
                             style={{ display: 'none' }} 
                             onChange={(e) => handleFileUpload(e, 'drugLicense1')} 
                           />
@@ -872,11 +887,11 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                       )}
                     </div>
 
-                    {/* Drug License No 2 Field with Upload Button */}
+                    {/* Drug License No 2 Field (OPTIONAL) with Upload Button */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
                         <label style={{ fontSize: '0.82rem', fontWeight: '700', color: 'var(--text-dark)', whiteSpace: 'nowrap' }}>
-                          Drug License No 2 <span style={{ color: '#ef4444' }}>*</span>
+                          Drug License No 2 (Form 21) <span style={{ fontSize: '0.74rem', color: '#64748b', fontWeight: '600' }}>(વૈકલ્પિક / Optional)</span>
                         </label>
                         <label style={{
                           display: 'inline-flex', alignItems: 'center', gap: '5px',
@@ -889,7 +904,7 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                           <span>{docFiles.drugLicense2 ? 'Change File' : 'Upload (≤500 KB)'}</span>
                           <input 
                             type="file" 
-                            accept="image/png, image/jpeg, image/jpg, .pdf" 
+                            accept=".pdf, .jpg, .jpeg, .png, .webp, application/pdf, image/jpeg, image/png, image/webp" 
                             style={{ display: 'none' }} 
                             onChange={(e) => handleFileUpload(e, 'drugLicense2')} 
                           />
@@ -900,10 +915,9 @@ function AuthModal({ isOpen, onClose, onSuccess }) {
                         <input 
                           type="text" 
                           name="drugLicense2" 
-                          required
                           value={formData.drugLicense2} 
                           onChange={handleChange}
-                          placeholder="e.g. 21B/5678 or G/21/5678"
+                          placeholder="e.g. 21B/5678 or G/21/5678 (Optional)"
                           style={{ width: '100%', padding: '9px 10px 9px 36px', borderRadius: '6px', border: '1px solid var(--border-light)', fontSize: '0.84rem' }}
                         />
                       </div>

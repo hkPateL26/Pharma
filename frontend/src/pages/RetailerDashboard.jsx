@@ -396,11 +396,21 @@ export default function RetailerDashboard() {
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
                   <Phone size={15} color="#93c5fd" /> +91 {cleanMobile}
                 </span>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', backgroundColor: 'rgba(56, 189, 248, 0.2)', color: '#bae6fd', padding: '2px 8px', borderRadius: '4px', fontWeight: '700', fontSize: '0.76rem' }}>
-                  GST: {user?.gstin || '24KGHGAHHJH454'}
-                </span>
+                {user?.gstin ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', backgroundColor: 'rgba(56, 189, 248, 0.2)', color: '#bae6fd', padding: '2px 8px', borderRadius: '4px', fontWeight: '700', fontSize: '0.76rem' }}>
+                    GST: {user.gstin}
+                  </span>
+                ) : user?.pan ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', backgroundColor: 'rgba(56, 189, 248, 0.2)', color: '#bae6fd', padding: '2px 8px', borderRadius: '4px', fontWeight: '700', fontSize: '0.76rem' }}>
+                    PAN: {user.pan} (No GST)
+                  </span>
+                ) : (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', backgroundColor: 'rgba(56, 189, 248, 0.2)', color: '#bae6fd', padding: '2px 8px', borderRadius: '4px', fontWeight: '700', fontSize: '0.76rem' }}>
+                    GST: Exempted
+                  </span>
+                )}
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', backgroundColor: 'rgba(74, 222, 128, 0.2)', color: '#bbf7d0', padding: '2px 8px', borderRadius: '4px', fontWeight: '700', fontSize: '0.76rem' }}>
-                  DL: {user?.drugLicense || 'g/14/45'}
+                  DL: {user?.drugLicense1 || user?.drugLicense || 'Form 20 Verified'}
                 </span>
               </div>
             </div>

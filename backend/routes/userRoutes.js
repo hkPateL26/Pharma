@@ -47,7 +47,7 @@ function checkDocType(file, cb) {
 // Document Upload limited to 500 KB as requested
 const docUpload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit (specific register limits enforced on client/register endpoint)
+  limits: { fileSize: 500 * 1024 }, // 500 KB strict limit // 10MB limit (specific register limits enforced on client/register endpoint)
   fileFilter(req, file, cb) {
     checkDocType(file, cb);
   },
@@ -89,6 +89,36 @@ router.post('/upload-doc', (req, res) => {
     });
   });
 });
+
+// Helper: Ensure document is stored as Base64 Data URL in MongoDB Atlas Cloud
+function resolveCloudDoc(docString) {
+  if (!docString) return '';
+  if (typeof docString !== 'string') return '';
+  // If already a Data URL, it is directly cloud-stored in MongoDB
+  if (docString.startsWith('data:')) {
+    return docString;
+  }
+  // If relative /uploads/ path, attempt to load file buffer into Base64
+  if (docString.startsWith('/uploads/')) {
+    try {
+      const filename = path.basename(docString);
+      const filePath = path.join(uploadDir, filename);
+      if (fs.existsSync(filePath)) {
+        const ext = path.extname(filename).toLowerCase();
+        let mime = 'application/octet-stream';
+        if (ext === '.pdf') mime = 'application/pdf';
+        else if (ext === '.jpg' || ext === '.jpeg') mime = 'image/jpeg';
+        else if (ext === '.png') mime = 'image/png';
+        else if (ext === '.webp') mime = 'image/webp';
+        const buffer = fs.readFileSync(filePath);
+        return `data:${mime};base64,${buffer.toString('base64')}`;
+      }
+    } catch (e) {
+      console.warn('resolveCloudDoc error:', e.message);
+    }
+  }
+  return docString;
+}
 
 // @desc    Register a new user / chemist
 // @route   POST /api/users/register
@@ -134,44 +164,49 @@ router.post('/register', async (req, res) => {
     }
 
     const normalizedEmail = email.toLowerCase().trim();
-    const normalizedGstin = (gstin || '').trim().toUpperCase();
-    const normalizedPan = (pan || '').trim().toUpperCase();
+    let normalizedGstin = (gstin || '').trim().toUpperCase();
+    let normalizedPan = (pan || '').trim().toUpperCase();
 
+    // 1. GSTIN is completely OPTIONAL as requested.
+    // If GSTIN is not provided, PAN Number & PAN document are mandatory.
     if (!normalizedGstin) {
-      return res.status(400).json({ message: 'GSTIN Number is required' });
-    }
-    if (!normalizedPan) {
-      return res.status(400).json({ message: 'PAN Number is required' });
+      if (!normalizedPan) {
+        return res.status(400).json({ message: 'PAN Number is required when GSTIN is not provided.' });
+      }
+      if (normalizedPan.length !== 10) {
+        return res.status(400).json({ message: 'PAN Number must be exactly 10 alphanumeric characters (e.g. ABCDE1234F).' });
+      }
+      if (!panDoc) {
+        return res.status(400).json({ message: 'PAN Card document upload is required when GSTIN is not provided (Max 500 KB).' });
+      }
+    } else {
+      // If GSTIN is provided, auto-derive PAN if not explicitly typed
+      if (!normalizedPan && normalizedGstin.length >= 12) {
+        normalizedPan = normalizedGstin.substring(2, 12);
+      }
     }
 
+    // 2. Drug License 1 (Form 20) is required
     const dl1 = (drugLicense1 || drugLicense || '').trim();
-    const dl2 = (drugLicense2 || '').trim();
+    const dl2 = (drugLicense2 || '').trim(); // Drug License 2 (Form 21) is OPTIONAL
 
     if (!dl1) {
-      return res.status(400).json({ message: 'Drug License No 1 is required' });
-    }
-    if (!dl2) {
-      return res.status(400).json({ message: 'Drug License No 2 is required' });
-    }
-
-    // Document Upload Verification (Max 500 KB each)
-    if (!gstinDoc) {
-      return res.status(400).json({ message: 'GSTIN Certificate document upload is required (Max 500 KB)' });
-    }
-    if (!panDoc) {
-      return res.status(400).json({ message: 'PAN Card document upload is required (Max 500 KB)' });
+      return res.status(400).json({ message: 'Drug License No 1 (Form 20) is required.' });
     }
     if (!drugLicense1Doc) {
-      return res.status(400).json({ message: 'Drug License No 1 document upload is required (Max 500 KB)' });
-    }
-    if (!drugLicense2Doc) {
-      return res.status(400).json({ message: 'Drug License No 2 document upload is required (Max 500 KB)' });
+      return res.status(400).json({ message: 'Drug License No 1 document upload is required (PDF/JPG/PNG, Max 500 KB).' });
     }
 
     const userExists = await User.findOne({ email: normalizedEmail });
     if (userExists) {
-      return res.status(400).json({ message: 'User already exists with this email' });
+      return res.status(400).json({ message: 'A chemist account already exists with this email address.' });
     }
+
+    // 3. Resolve all uploaded documents to persistent Base64 Data URLs so they are stored directly in MongoDB Atlas Cloud
+    const cloudGstinDoc = resolveCloudDoc(gstinDoc);
+    const cloudPanDoc = resolveCloudDoc(panDoc);
+    const cloudDl1Doc = resolveCloudDoc(drugLicense1Doc);
+    const cloudDl2Doc = resolveCloudDoc(drugLicense2Doc);
 
     const user = await User.create({
       name: name.trim(),
@@ -183,10 +218,10 @@ router.post('/register', async (req, res) => {
       drugLicense: dl1,
       drugLicense1: dl1,
       drugLicense2: dl2,
-      gstinDoc: gstinDoc || '',
-      panDoc: panDoc || '',
-      drugLicense1Doc: drugLicense1Doc || '',
-      drugLicense2Doc: drugLicense2Doc || '',
+      gstinDoc: cloudGstinDoc,
+      panDoc: cloudPanDoc,
+      drugLicense1Doc: cloudDl1Doc,
+      drugLicense2Doc: cloudDl2Doc,
       phone: sanitizedPhone,
     });
 
